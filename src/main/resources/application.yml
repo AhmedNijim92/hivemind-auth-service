@@ -1,0 +1,58 @@
+server:
+  port: 8081
+  error:
+    include-message: always
+    include-exception: true
+
+spring:
+  application:
+    name: auth-service
+  
+  data:
+    cassandra:
+      keyspace-name: auth_keyspace
+      contact-points: ${CASSANDRA_HOST:localhost}
+      port: ${CASSANDRA_PORT:9042}
+      local-datacenter: ${CASSANDRA_DATACENTER:datacenter1}
+      schema-action: CREATE_IF_NOT_EXISTS
+  
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+  
+  profiles:
+    active: ${SPRING_PROFILES_ACTIVE:dev}
+
+eureka:
+  client:
+    service-url:
+      defaultZone: ${EUREKA_SERVER:http://localhost:8761/eureka}
+  instance:
+    prefer-ip-address: true
+
+jwt:
+  secret: ${JWT_SECRET:3kRjUdqgxIuZCeEdiX6q7kTsgtOkC75o4D5czNbTV9A=}
+  expiration: ${JWT_EXPIRATION:86400000}
+
+twilio:
+  account:
+    sid: ${TWILIO_ACCOUNT_SID:your_account_sid}
+  auth:
+    token: ${TWILIO_AUTH_TOKEN:your_auth_token}
+  phone:
+    number: ${TWILIO_PHONE_NUMBER:your_phone_number}
+
+otp:
+  expiration-minutes: ${OTP_EXPIRATION_MINUTES:5}
+  cleanup-interval-minutes: ${OTP_CLEANUP_INTERVAL:10}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+  metrics:
+    tags:
+      application: ${spring.application.name}
