@@ -1,8 +1,9 @@
 server:
   port: 8081
   error:
-    include-message: always
-    include-exception: true
+    include-message: never
+    include-exception: false
+    include-stacktrace: never
 
 spring:
   application:
@@ -52,7 +53,7 @@ management:
   endpoints:
     web:
       exposure:
-        include: health,info,metrics,prometheus
-  metrics:
-    tags:
-      application: ${spring.application.name}
+        include: health
+  endpoint:
+    health:
+      show-details: never
