@@ -51,7 +51,8 @@ public class SecurityConfig
             "/api/v1/auth/signin",
             "/api/v1/auth/sendOtp",
             "/api/v1/auth/createUser",
-            "/actuator/**"
+            "/actuator/**",
+            "/error"
     };
 
     private static final String[] ADMIN_URLS = {
