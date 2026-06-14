@@ -31,6 +31,7 @@ public class JWTServiceImpl implements IJWTService
         claims.put("userId", user.getUserId().toString());
         claims.put("role", user.getRole());
         claims.put("email", user.getEmail());
+        claims.put("name", user.getName());
 
         return Jwts.builder()
                 .claims(claims)
