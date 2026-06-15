@@ -16,4 +16,5 @@ public class JwtAuthenticationResponse
     private String token;
     private UUID userId;
     private String role;
+    private String name;
 }

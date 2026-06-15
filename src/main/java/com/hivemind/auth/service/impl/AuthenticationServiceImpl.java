@@ -50,6 +50,7 @@ public class AuthenticationServiceImpl implements IAuthenticationService
                 .token(token)
                 .userId(user.getUserId())
                 .role(user.getRole())
+                .name(user.getName())
                 .build();
     }
 
@@ -82,6 +83,7 @@ public class AuthenticationServiceImpl implements IAuthenticationService
                 .token(token)
                 .userId(user.getUserId())
                 .role(user.getRole())
+                .name(user.getName())
                 .build();
     }
 
@@ -104,6 +106,7 @@ public class AuthenticationServiceImpl implements IAuthenticationService
                 .token(token)
                 .userId(user.getUserId())
                 .role(user.getRole())
+                .name(user.getName())
                 .build();
     }
 }
