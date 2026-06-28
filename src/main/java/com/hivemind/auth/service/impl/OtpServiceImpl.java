@@ -3,9 +3,8 @@ package com.hivemind.auth.service.impl;
 import com.hivemind.auth.entity.User;
 import com.hivemind.auth.repository.UserRepository;
 import com.hivemind.auth.service.IOtpService;
-import com.twilio.Twilio;
-import com.twilio.rest.api.v2010.account.Message;
-import com.twilio.type.PhoneNumber;
+import com.vonage.client.VonageClient;
+import com.vonage.client.messages.sms.SmsTextRequest;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
@@ -23,20 +22,19 @@ import java.util.UUID;
 @Slf4j
 public class OtpServiceImpl implements IOtpService
 {
-
     private final UserRepository userRepository;
     private final PasswordEncoder passwordEncoder;
 
-    @Value ("${twilio.account.sid}")
-    private String twilioAccountSid;
+    @Value("${vonage.api.key}")
+    private String vonageApiKey;
 
-    @Value ("${twilio.auth.token}")
-    private String twilioAuthToken;
+    @Value("${vonage.api.secret}")
+    private String vonageApiSecret;
 
-    @Value ("${twilio.phone.number}")
-    private String twilioPhoneNumber;
+    @Value("${vonage.from:HiveMind}")
+    private String vonageFrom;
 
-    @Value ("${spring.profiles.active:dev}")
+    @Value("${spring.profiles.active:dev}")
     private String activeProfile;
 
     @Override
@@ -65,11 +63,11 @@ public class OtpServiceImpl implements IOtpService
 
         if ("dev".equals(activeProfile))
         {
-            log.info("OTP for {}: {}", mobileNumber, otp);
+            log.info("DEV MODE — OTP for {}: {}", mobileNumber, otp);
         }
         else
         {
-            sendSms(mobileNumber, otp);
+            sendSmsViaVonage(mobileNumber, otp);
         }
     }
 
@@ -85,7 +83,7 @@ public class OtpServiceImpl implements IOtpService
     }
 
     @Override
-    @Scheduled (fixedDelayString = "${otp.cleanup-interval-minutes:10}", timeUnit = java.util.concurrent.TimeUnit.MINUTES)
+    @Scheduled(fixedDelayString = "${otp.cleanup-interval-minutes:10}", timeUnit = java.util.concurrent.TimeUnit.MINUTES)
     public void cleanupExpiredOtps()
     {
         log.info("Cleaning up expired OTPs");
@@ -98,21 +96,32 @@ public class OtpServiceImpl implements IOtpService
         return String.valueOf(otp);
     }
 
-    private void sendSms(String mobileNumber, String otp)
+    private void sendSmsViaVonage(String mobileNumber, String otp)
     {
         try
         {
-            Twilio.init(twilioAccountSid, twilioAuthToken);
-            Message.creator(
-                    new PhoneNumber(mobileNumber),
-                    new PhoneNumber(twilioPhoneNumber),
-                    "Your HiveMind OTP is: " + otp
-            ).create();
-            log.info("OTP sent to {}", mobileNumber);
+            VonageClient client = VonageClient.builder()
+                    .apiKey(vonageApiKey)
+                    .apiSecret(vonageApiSecret)
+                    .build();
+
+            // Strip '+' from number for Vonage (expects digits only e.g. 46707518829)
+            String toNumber = mobileNumber.replace("+", "");
+
+            var response = client.getMessagesClient().sendMessage(
+                    SmsTextRequest.builder()
+                            .from(vonageFrom)
+                            .to(toNumber)
+                            .text("Your HiveMind verification code is: " + otp + "\n\nDo not share this code.")
+                            .build()
+            );
+
+            log.info("OTP sent to {} via Vonage. Message ID: {}", mobileNumber, response.getMessageUuid());
         }
         catch (Exception e)
         {
-            log.error("Failed to send OTP: {}", e.getMessage());
+            log.error("Failed to send OTP via Vonage to {}: {}", mobileNumber, e.getMessage());
+            throw new RuntimeException("Failed to send verification code. Please try again.");
         }
     }
 }
