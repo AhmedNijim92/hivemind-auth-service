@@ -15,11 +15,18 @@ import org.springframework.web.client.RestTemplate;
 import java.security.SecureRandom;
 import java.time.LocalDate;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * OTP Service using Vonage Verify v2 API.
- * In dev mode: logs OTP to console.
- * In prod mode: sends real SMS via Vonage Verify (handles carrier rules, retries, sender IDs).
+ * OTP Service using Vonage Verify v2 API for production SMS delivery.
+ * 
+ * Vonage Verify handles:
+ * - Sender ID/number selection per country
+ * - Carrier compliance
+ * - Retry logic (SMS → Voice fallback)
+ * - Rate limiting
+ * 
+ * In dev mode: logs OTP to console (no external calls).
  */
 @Service
 @RequiredArgsConstructor
@@ -38,15 +45,14 @@ public class OtpServiceImpl implements IOtpService
     @Value("${spring.profiles.active:dev}")
     private String activeProfile;
 
-    // Store Vonage Verify request IDs for verification
-    private final Map<String, String> verifyRequestIds = new HashMap<>();
+    // Store Vonage Verify request IDs for each phone number
+    private final ConcurrentHashMap<String, String> verifyRequests = new ConcurrentHashMap<>();
 
     @Override
     public void sendOtp(String mobileNumber)
     {
         if ("dev".equals(activeProfile))
         {
-            // Dev mode: generate and store OTP locally
             String otp = generateOtp();
             String hashedOtp = passwordEncoder.encode(otp);
             saveOtpForUser(mobileNumber, hashedOtp);
@@ -54,23 +60,26 @@ public class OtpServiceImpl implements IOtpService
         }
         else
         {
-            // Prod mode: use Vonage SMS API with proper number format
-            String otp = generateOtp();
-            String hashedOtp = passwordEncoder.encode(otp);
-            saveOtpForUser(mobileNumber, hashedOtp);
-            sendSmsViaVonageRest(mobileNumber, otp);
+            // Use Vonage Verify API — it generates & sends the OTP
+            sendViaVonageVerify(mobileNumber);
         }
     }
 
     @Override
     public boolean verifyOtp(String mobileNumber, String otp)
     {
-        Optional<User> userOpt = userRepository.findByMobileNumber(mobileNumber);
-        if (userOpt.isEmpty())
+        if ("dev".equals(activeProfile))
         {
-            return false;
+            // Dev mode: verify against locally stored hash
+            Optional<User> userOpt = userRepository.findByMobileNumber(mobileNumber);
+            if (userOpt.isEmpty()) return false;
+            return passwordEncoder.matches(otp, userOpt.get().getOtp());
         }
-        return passwordEncoder.matches(otp, userOpt.get().getOtp());
+        else
+        {
+            // Prod mode: verify via Vonage Verify API
+            return verifyViaVonage(mobileNumber, otp);
+        }
     }
 
     @Override
@@ -78,6 +87,7 @@ public class OtpServiceImpl implements IOtpService
     public void cleanupExpiredOtps()
     {
         log.info("Cleaning up expired OTPs");
+        verifyRequests.clear();
     }
 
     private void saveOtpForUser(String mobileNumber, String hashedOtp)
@@ -109,27 +119,27 @@ public class OtpServiceImpl implements IOtpService
     }
 
     /**
-     * Send SMS using Vonage REST SMS API (not Messages API).
-     * The REST SMS API is simpler and works with trial accounts without sender ID registration.
-     * Endpoint: https://rest.nexmo.com/sms/json
+     * Use Vonage Verify v2 API to send OTP.
+     * POST https://api.nexmo.com/verify/json
+     * Vonage handles sender selection, carrier compliance, and delivery.
      */
-    private void sendSmsViaVonageRest(String mobileNumber, String otp)
+    private void sendViaVonageVerify(String mobileNumber)
     {
         try
         {
             RestTemplate restTemplate = new RestTemplate();
 
-            // Strip '+' for Vonage (expects: 46707518829)
+            // Strip '+' for Vonage format
             String toNumber = mobileNumber.replaceAll("[^0-9]", "");
 
-            String url = "https://rest.nexmo.com/sms/json";
+            String url = "https://api.nexmo.com/verify/json";
 
             Map<String, String> body = new HashMap<>();
             body.put("api_key", vonageApiKey);
             body.put("api_secret", vonageApiSecret);
-            body.put("to", toNumber);
-            body.put("from", "HiveMind");
-            body.put("text", "Your HiveMind code is: " + otp);
+            body.put("number", toNumber);
+            body.put("brand", "HiveMind");
+            body.put("code_length", "6");
 
             HttpHeaders headers = new HttpHeaders();
             headers.setContentType(MediaType.APPLICATION_JSON);
@@ -139,28 +149,104 @@ public class OtpServiceImpl implements IOtpService
 
             if (response.getStatusCode().is2xxSuccessful() && response.getBody() != null)
             {
-                List<Map<String, Object>> messages = (List<Map<String, Object>>) response.getBody().get("messages");
-                if (messages != null && !messages.isEmpty())
+                String status = (String) response.getBody().get("status");
+                if ("0".equals(status))
                 {
-                    Map<String, Object> msg = messages.get(0);
-                    String status = (String) msg.get("status");
-                    if ("0".equals(status))
-                    {
-                        log.info("OTP sent to {} via Vonage SMS API. Message ID: {}", mobileNumber, msg.get("message-id"));
-                    }
-                    else
-                    {
-                        String errorText = (String) msg.get("error-text");
-                        log.error("Vonage SMS failed for {}: {} - {}", mobileNumber, status, errorText);
-                        throw new RuntimeException("SMS delivery failed: " + errorText);
-                    }
+                    String requestId = (String) response.getBody().get("request_id");
+                    verifyRequests.put(mobileNumber, requestId);
+                    log.info("Vonage Verify sent to {}. Request ID: {}", mobileNumber, requestId);
+
+                    // Also create/update user record so login flow works
+                    ensureUserExists(mobileNumber);
+                }
+                else
+                {
+                    String errorText = (String) response.getBody().get("error_text");
+                    log.error("Vonage Verify failed for {}: status={}, error={}", mobileNumber, status, errorText);
+                    throw new RuntimeException("Failed to send verification code: " + errorText);
                 }
             }
+        }
+        catch (RuntimeException e)
+        {
+            throw e;
         }
         catch (Exception e)
         {
             log.error("Failed to send OTP to {}: {}", mobileNumber, e.getMessage());
-            // Don't throw — OTP is still stored, user can retry
+            throw new RuntimeException("Failed to send verification code. Please try again.");
+        }
+    }
+
+    /**
+     * Verify OTP via Vonage Verify check API.
+     * POST https://api.nexmo.com/verify/check/json
+     */
+    private boolean verifyViaVonage(String mobileNumber, String otp)
+    {
+        String requestId = verifyRequests.get(mobileNumber);
+        if (requestId == null)
+        {
+            log.warn("No Verify request found for {}. Falling back to local check.", mobileNumber);
+            // Fallback to local hash check
+            Optional<User> userOpt = userRepository.findByMobileNumber(mobileNumber);
+            if (userOpt.isEmpty()) return false;
+            return passwordEncoder.matches(otp, userOpt.get().getOtp());
+        }
+
+        try
+        {
+            RestTemplate restTemplate = new RestTemplate();
+
+            String url = "https://api.nexmo.com/verify/check/json";
+
+            Map<String, String> body = new HashMap<>();
+            body.put("api_key", vonageApiKey);
+            body.put("api_secret", vonageApiSecret);
+            body.put("request_id", requestId);
+            body.put("code", otp);
+
+            HttpHeaders headers = new HttpHeaders();
+            headers.setContentType(MediaType.APPLICATION_JSON);
+
+            HttpEntity<Map<String, String>> request = new HttpEntity<>(body, headers);
+            ResponseEntity<Map> response = restTemplate.postForEntity(url, request, Map.class);
+
+            if (response.getStatusCode().is2xxSuccessful() && response.getBody() != null)
+            {
+                String status = (String) response.getBody().get("status");
+                if ("0".equals(status))
+                {
+                    log.info("OTP verified for {} via Vonage Verify", mobileNumber);
+                    verifyRequests.remove(mobileNumber);
+                    return true;
+                }
+                else
+                {
+                    log.warn("Vonage Verify check failed for {}: status={}", mobileNumber, status);
+                    return false;
+                }
+            }
+            return false;
+        }
+        catch (Exception e)
+        {
+            log.error("Vonage Verify check error for {}: {}", mobileNumber, e.getMessage());
+            return false;
+        }
+    }
+
+    private void ensureUserExists(String mobileNumber)
+    {
+        Optional<User> existingUser = userRepository.findByMobileNumber(mobileNumber);
+        if (existingUser.isEmpty())
+        {
+            User newUser = new User();
+            newUser.setUserId(UUID.randomUUID());
+            newUser.setMobileNumber(mobileNumber);
+            newUser.setRole("USER");
+            newUser.setCreatedAt(LocalDate.now());
+            userRepository.save(newUser);
         }
     }
 }
