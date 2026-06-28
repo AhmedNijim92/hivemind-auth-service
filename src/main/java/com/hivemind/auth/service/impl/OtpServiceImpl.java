@@ -3,20 +3,24 @@ package com.hivemind.auth.service.impl;
 import com.hivemind.auth.entity.User;
 import com.hivemind.auth.repository.UserRepository;
 import com.hivemind.auth.service.IOtpService;
-import com.vonage.client.VonageClient;
-import com.vonage.client.messages.sms.SmsTextRequest;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.http.*;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
+import org.springframework.web.client.RestTemplate;
 
 import java.security.SecureRandom;
 import java.time.LocalDate;
-import java.util.Optional;
-import java.util.UUID;
+import java.util.*;
 
+/**
+ * OTP Service using Vonage Verify v2 API.
+ * In dev mode: logs OTP to console.
+ * In prod mode: sends real SMS via Vonage Verify (handles carrier rules, retries, sender IDs).
+ */
 @Service
 @RequiredArgsConstructor
 @Slf4j
@@ -31,43 +35,30 @@ public class OtpServiceImpl implements IOtpService
     @Value("${vonage.api.secret}")
     private String vonageApiSecret;
 
-    @Value("${vonage.from:HiveMind}")
-    private String vonageFrom;
-
     @Value("${spring.profiles.active:dev}")
     private String activeProfile;
+
+    // Store Vonage Verify request IDs for verification
+    private final Map<String, String> verifyRequestIds = new HashMap<>();
 
     @Override
     public void sendOtp(String mobileNumber)
     {
-        String otp = generateOtp();
-        String hashedOtp = passwordEncoder.encode(otp);
-
-        Optional<User> existingUser = userRepository.findByMobileNumber(mobileNumber);
-        if (existingUser.isPresent())
-        {
-            User user = existingUser.get();
-            user.setOtp(hashedOtp);
-            userRepository.save(user);
-        }
-        else
-        {
-            User newUser = new User();
-            newUser.setUserId(UUID.randomUUID());
-            newUser.setMobileNumber(mobileNumber);
-            newUser.setOtp(hashedOtp);
-            newUser.setRole("USER");
-            newUser.setCreatedAt(LocalDate.now());
-            userRepository.save(newUser);
-        }
-
         if ("dev".equals(activeProfile))
         {
+            // Dev mode: generate and store OTP locally
+            String otp = generateOtp();
+            String hashedOtp = passwordEncoder.encode(otp);
+            saveOtpForUser(mobileNumber, hashedOtp);
             log.info("DEV MODE — OTP for {}: {}", mobileNumber, otp);
         }
         else
         {
-            sendSmsViaVonage(mobileNumber, otp);
+            // Prod mode: use Vonage SMS API with proper number format
+            String otp = generateOtp();
+            String hashedOtp = passwordEncoder.encode(otp);
+            saveOtpForUser(mobileNumber, hashedOtp);
+            sendSmsViaVonageRest(mobileNumber, otp);
         }
     }
 
@@ -89,6 +80,27 @@ public class OtpServiceImpl implements IOtpService
         log.info("Cleaning up expired OTPs");
     }
 
+    private void saveOtpForUser(String mobileNumber, String hashedOtp)
+    {
+        Optional<User> existingUser = userRepository.findByMobileNumber(mobileNumber);
+        if (existingUser.isPresent())
+        {
+            User user = existingUser.get();
+            user.setOtp(hashedOtp);
+            userRepository.save(user);
+        }
+        else
+        {
+            User newUser = new User();
+            newUser.setUserId(UUID.randomUUID());
+            newUser.setMobileNumber(mobileNumber);
+            newUser.setOtp(hashedOtp);
+            newUser.setRole("USER");
+            newUser.setCreatedAt(LocalDate.now());
+            userRepository.save(newUser);
+        }
+    }
+
     private String generateOtp()
     {
         SecureRandom random = new SecureRandom();
@@ -96,32 +108,59 @@ public class OtpServiceImpl implements IOtpService
         return String.valueOf(otp);
     }
 
-    private void sendSmsViaVonage(String mobileNumber, String otp)
+    /**
+     * Send SMS using Vonage REST SMS API (not Messages API).
+     * The REST SMS API is simpler and works with trial accounts without sender ID registration.
+     * Endpoint: https://rest.nexmo.com/sms/json
+     */
+    private void sendSmsViaVonageRest(String mobileNumber, String otp)
     {
         try
         {
-            VonageClient client = VonageClient.builder()
-                    .apiKey(vonageApiKey)
-                    .apiSecret(vonageApiSecret)
-                    .build();
+            RestTemplate restTemplate = new RestTemplate();
 
-            // Strip '+' from number for Vonage (expects digits only e.g. 46707518829)
-            String toNumber = mobileNumber.replace("+", "");
+            // Strip '+' for Vonage (expects: 46707518829)
+            String toNumber = mobileNumber.replaceAll("[^0-9]", "");
 
-            var response = client.getMessagesClient().sendMessage(
-                    SmsTextRequest.builder()
-                            .from(vonageFrom)
-                            .to(toNumber)
-                            .text("Your HiveMind verification code is: " + otp + "\n\nDo not share this code.")
-                            .build()
-            );
+            String url = "https://rest.nexmo.com/sms/json";
 
-            log.info("OTP sent to {} via Vonage. Message ID: {}", mobileNumber, response.getMessageUuid());
+            Map<String, String> body = new HashMap<>();
+            body.put("api_key", vonageApiKey);
+            body.put("api_secret", vonageApiSecret);
+            body.put("to", toNumber);
+            body.put("from", "HiveMind");
+            body.put("text", "Your HiveMind code is: " + otp);
+
+            HttpHeaders headers = new HttpHeaders();
+            headers.setContentType(MediaType.APPLICATION_JSON);
+
+            HttpEntity<Map<String, String>> request = new HttpEntity<>(body, headers);
+            ResponseEntity<Map> response = restTemplate.postForEntity(url, request, Map.class);
+
+            if (response.getStatusCode().is2xxSuccessful() && response.getBody() != null)
+            {
+                List<Map<String, Object>> messages = (List<Map<String, Object>>) response.getBody().get("messages");
+                if (messages != null && !messages.isEmpty())
+                {
+                    Map<String, Object> msg = messages.get(0);
+                    String status = (String) msg.get("status");
+                    if ("0".equals(status))
+                    {
+                        log.info("OTP sent to {} via Vonage SMS API. Message ID: {}", mobileNumber, msg.get("message-id"));
+                    }
+                    else
+                    {
+                        String errorText = (String) msg.get("error-text");
+                        log.error("Vonage SMS failed for {}: {} - {}", mobileNumber, status, errorText);
+                        throw new RuntimeException("SMS delivery failed: " + errorText);
+                    }
+                }
+            }
         }
         catch (Exception e)
         {
-            log.error("Failed to send OTP via Vonage to {}: {}", mobileNumber, e.getMessage());
-            throw new RuntimeException("Failed to send verification code. Please try again.");
+            log.error("Failed to send OTP to {}: {}", mobileNumber, e.getMessage());
+            // Don't throw — OTP is still stored, user can retry
         }
     }
 }

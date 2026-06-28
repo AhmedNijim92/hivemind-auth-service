@@ -69,6 +69,8 @@
             <artifactId>server-sdk</artifactId>
             <version>8.13.0</version>
         </dependency>
+        <!-- Note: We use Vonage REST SMS API directly via RestTemplate,
+             but keep the SDK for potential future Verify API usage -->
         <dependency>
             <groupId>com.hivemind</groupId>
             <artifactId>hivemind-common</artifactId>
