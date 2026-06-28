@@ -129,8 +129,13 @@ public class OtpServiceImpl implements IOtpService
         {
             RestTemplate restTemplate = new RestTemplate();
 
-            // Strip '+' for Vonage format
+            // Strip '+' for Vonage format (expects: 46707518829)
             String toNumber = mobileNumber.replaceAll("[^0-9]", "");
+            
+            // Remove leading zeros after country code if present (e.g. 460707... -> 46707...)
+            if (toNumber.startsWith("460")) {
+                toNumber = "46" + toNumber.substring(3);
+            }
 
             String url = "https://api.nexmo.com/verify/json";
 
@@ -140,6 +145,8 @@ public class OtpServiceImpl implements IOtpService
             body.put("number", toNumber);
             body.put("brand", "HiveMind");
             body.put("code_length", "6");
+
+            log.info("Sending Vonage Verify to number: {} (original: {})", toNumber, mobileNumber);
 
             HttpHeaders headers = new HttpHeaders();
             headers.setContentType(MediaType.APPLICATION_JSON);
