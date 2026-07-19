@@ -6,6 +6,7 @@ import com.hivemind.auth.service.IOtpService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.http.*;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.security.crypto.password.PasswordEncoder;
@@ -15,7 +16,7 @@ import org.springframework.web.client.RestTemplate;
 import java.security.SecureRandom;
 import java.time.LocalDate;
 import java.util.*;
-import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
 
 /**
  * OTP Service using Vonage Verify v2 API for production SMS delivery.
@@ -35,6 +36,10 @@ public class OtpServiceImpl implements IOtpService
 {
     private final UserRepository userRepository;
     private final PasswordEncoder passwordEncoder;
+    private final RedisTemplate<String, String> redisTemplate;
+
+    private static final String VERIFY_KEY_PREFIX = "otp:verify:";
+    private static final long VERIFY_TTL_MINUTES = 10;
 
     @Value("${vonage.api.key}")
     private String vonageApiKey;
@@ -44,9 +49,6 @@ public class OtpServiceImpl implements IOtpService
 
     @Value("${spring.profiles.active:dev}")
     private String activeProfile;
-
-    // Store Vonage Verify request IDs for each phone number
-    private final ConcurrentHashMap<String, String> verifyRequests = new ConcurrentHashMap<>();
 
     @Override
     public void sendOtp(String mobileNumber)
@@ -86,8 +88,7 @@ public class OtpServiceImpl implements IOtpService
     @Scheduled(fixedDelayString = "${otp.cleanup-interval-minutes:10}", timeUnit = java.util.concurrent.TimeUnit.MINUTES)
     public void cleanupExpiredOtps()
     {
-        log.info("Cleaning up expired OTPs");
-        verifyRequests.clear();
+        log.info("OTP cleanup cycle — Redis TTL handles expiry automatically");
     }
 
     private void saveOtpForUser(String mobileNumber, String hashedOtp)
@@ -160,7 +161,9 @@ public class OtpServiceImpl implements IOtpService
                 if ("0".equals(status))
                 {
                     String requestId = (String) response.getBody().get("request_id");
-                    verifyRequests.put(mobileNumber, requestId);
+                    redisTemplate.opsForValue().set(
+                        VERIFY_KEY_PREFIX + mobileNumber, requestId, VERIFY_TTL_MINUTES, TimeUnit.MINUTES
+                    );
                     log.info("Vonage Verify sent to {}. Request ID: {}", mobileNumber, requestId);
 
                     // Also create/update user record so login flow works
@@ -191,7 +194,7 @@ public class OtpServiceImpl implements IOtpService
      */
     private boolean verifyViaVonage(String mobileNumber, String otp)
     {
-        String requestId = verifyRequests.get(mobileNumber);
+        String requestId = redisTemplate.opsForValue().get(VERIFY_KEY_PREFIX + mobileNumber);
         if (requestId == null)
         {
             log.warn("No Verify request found for {}. Falling back to local check.", mobileNumber);
@@ -225,7 +228,7 @@ public class OtpServiceImpl implements IOtpService
                 if ("0".equals(status))
                 {
                     log.info("OTP verified for {} via Vonage Verify", mobileNumber);
-                    verifyRequests.remove(mobileNumber);
+                    redisTemplate.delete(VERIFY_KEY_PREFIX + mobileNumber);
                     return true;
                 }
                 else
