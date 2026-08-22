@@ -39,6 +39,9 @@ class AuthenticationServiceImplTest
     @Mock
     private KafkaTemplate<String, UserCreatedEvent> kafkaTemplate;
 
+    @Mock
+    private IUserService userService;
+
     @InjectMocks
     private AuthenticationServiceImpl authenticationService;
 
