@@ -7,6 +7,7 @@ import com.hivemind.auth.repository.UserRepository;
 import com.hivemind.auth.service.IAuthenticationService;
 import com.hivemind.auth.service.IJWTService;
 import com.hivemind.auth.service.IOtpService;
+import com.hivemind.auth.service.IUserService;
 import com.hivemind.common.dto.UserDto;
 import com.hivemind.common.event.UserCreatedEvent;
 import lombok.RequiredArgsConstructor;
@@ -26,6 +27,7 @@ public class AuthenticationServiceImpl implements IAuthenticationService
     private final IOtpService otpService;
     private final IJWTService jwtService;
     private final KafkaTemplate<String, UserCreatedEvent> kafkaTemplate;
+    private final IUserService userService;
 
     @Override
     public void sendOtp(String mobileNumber)
@@ -66,6 +68,8 @@ public class AuthenticationServiceImpl implements IAuthenticationService
         user.setCreatedAt(LocalDate.now());
 
         userRepository.save(user);
+
+        userService.createUserProfile(user.getUserId(), user.getMobileNumber(), user.getName(), user.getEmail());
 
         UserCreatedEvent event = UserCreatedEvent.builder()
                 .userId(user.getUserId())
